@@ -1,151 +1,181 @@
 ---
-# LAN Discovery Playbook
+# Unified LAN Discovery Playbook
 #
-# This playbook runs on registered probes to discover devices on their
-# local networks and synchronize discovered IP addresses to NetBox.
+# Works on both:
+#   - OPNsense Firewalls (via API + SSH)
+#   - Network Probes (Debian x86 via SSH)
 #
 # Usage:
-#   ansible-playbook discovery_lan.yml -i netbox_inventory.ini
-#
-# Requires:
-#   - nmap installed on probe
-#   - NetBox credentials
+#   ansible-playbook discovery_lan.yml
 
-- name: Discover LAN Devices on Probe
-  hosts: probes
+- name: LAN Discovery and Sync to NetBox
+  hosts: all
   gather_facts: true
-  become: true
+  serial: 10
+  
   vars:
-    # Local subnets to scan (can be overridden per host)
-    local_subnets: "{{ probe_subnets | default('192.168.1.0/24,10.0.0.0/24') }}"
-    nmap_args: "-sn"  # Ping scan only
-    nmap_output: "/tmp/lan_scan_{{ ansible_hostname }}.xml"
     netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
     netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
-
+    # Proxy for AWX to talk to NB if needed
+    proxy_env:
+      http_proxy: "{{ lookup('env', 'HTTP_PROXY') | default(omit) }}"
+      https_proxy: "{{ lookup('env', 'HTTPS_PROXY') | default(omit) }}"
+    
   tasks:
-    - name: Display probe information
-      ansible.builtin.debug:
-        msg:
-          - "Hostname: {{ ansible_hostname }}"
-          - "MAC: {{ ansible_default_ipv4.macaddress }}"
-          - "Primary IP: {{ ansible_default_ipv4.address }}"
-          - "Scanning subnets: {{ local_subnets }}"
+    # =========================================================================
+    # Task 1: Identify and Prepare Target
+    # =========================================================================
+    - name: Set target platform facts
+      ansible.builtin.set_fact:
+        is_opnsense: "{{ ansible_os_family == 'FreeBSD' }}"
+        is_probe: "{{ ansible_os_family == 'Debian' }}"
+        # Extract tenant from hostname or variable
+        target_tenant: "{{ tenant_slug | default(ansible_hostname.split('-')[0]) }}"
+        vrf_name: "{{ (tenant_slug | default(ansible_hostname.split('-')[0]) | upper) }}-VRF"
 
-    # ============================================
-    # Task 1: Run Nmap Scan
-    # ============================================
-    - name: Check if nmap is installed
-      ansible.builtin.command: which nmap
-      register: nmap_check
-      changed_when: false
-      ignore_errors: true
+    - name: Ensure Nmap is installed (OPNsense)
+      ansible.builtin.raw: pkg install -y nmap
+      when: is_opnsense
+      become: true
 
-    - name: Install nmap if missing (Debian/Ubuntu)
+    - name: Ensure Nmap is installed (Probe)
       ansible.builtin.apt:
         name: nmap
         state: present
         update_cache: yes
-      when:
-        - ansible_os_family == "Debian"
-        - nmap_check.rc != 0
+      when: is_probe
       become: true
 
-    - name: Install nmap if missing (RHEL/CentOS)
-      ansible.builtin.yum:
-        name: nmap
-        state: present
-      when:
-        - ansible_os_family == "RedHat"
-        - nmap_check.rc != 0
-      become: true
+    # =========================================================================
+    # Task 2: Calculate Subnets to Scan
+    # =========================================================================
+    - name: Detect subnets (Probe)
+      ansible.builtin.set_fact:
+        scan_subnets: >-
+          {%- set subnets = [] -%}
+          {%- for ip in ansible_all_ipv4_addresses -%}
+            {%- set net = ip | ansible.utils.ipaddr('network/24') -%}
+            {%- if net and (ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('172.')) -%}
+              {%- set _ = subnets.append(net) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ subnets | unique }}
+      when: is_probe
 
-    - name: Run nmap ping scan
-      ansible.builtin.command:
-        cmd: "nmap {{ nmap_args }} {{ local_subnets }} -oX {{ nmap_output }}"
-      register: nmap_result
-      changed_when: true
+    - name: Fetch interface config for subnets (OPNsense)
+      environment: "{{ proxy_env }}"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ api_port | default(1337) }}/api/diagnostics/interface/getInterfaceConfig"
+        user: "{{ opn_api_key }}"
+        password: "{{ opn_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+      register: if_config_resp
+      when: is_opnsense
+      delegate_to: localhost
 
-    - name: Fetch nmap XML results
+    - name: Calculate subnets (OPNsense)
+      ansible.builtin.set_fact:
+        scan_subnets: >-
+          {%- set networks = [] -%}
+          {%- for iface_name, iface_data in if_config_resp.json.items() -%}
+            {%- if iface_data.ipv4 is defined and iface_data.ipv4 | length > 0 -%}
+              {%- for ip_info in iface_data.ipv4 -%}
+                {%- set ip = ip_info.ipaddr -%}
+                {%- set cidr = ip | ansible.utils.ipaddr('network') + '/' + (ip_info.subnetbits | string) -%}
+                {%- if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('172.') -%}
+                  {%- set _ = networks.append(cidr) -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ networks | unique }}
+      when: is_opnsense
+
+    # =========================================================================
+    # Task 3: Run Scan and Parse
+    # =========================================================================
+    - name: Run Nmap scan on target
+      ansible.builtin.shell:
+        cmd: "nmap -sn {{ scan_subnets | join(' ') }} -oX /tmp/scan.xml"
+      when: scan_subnets | length > 0
+
+    - name: Fetch scan results
       ansible.builtin.fetch:
-        src: "{{ nmap_output }}"
+        src: /tmp/scan.xml
         dest: "/tmp/{{ ansible_hostname }}_scan.xml"
-        flat: true
-      become: false
+        flat: yes
 
-    # ============================================
-    # Task 2: Parse Nmap XML (on localhost)
-    # ============================================
-    - name: Parse nmap results on localhost
+    - name: Parse results on localhost
+      ansible.builtin.shell: |
+        python3 << 'EOF'
+        import xml.etree.ElementTree as ET
+        import json
+        tree = ET.parse('/tmp/{{ ansible_hostname }}_scan.xml')
+        root = tree.getroot()
+        hosts = []
+        for host in root.findall('host'):
+            status = host.find('status')
+            if status is not None and status.get('state') == 'up':
+                ip = ''
+                mac = ''
+                hostname = ''
+                for addr in host.findall('address'):
+                    if addr.get('addrtype') == 'ipv4': ip = addr.get('addr')
+                    if addr.get('addrtype') == 'mac': mac = addr.get('addr')
+                hnames = host.find('hostnames')
+                if hnames is not None:
+                    hn = hnames.find('hostname')
+                    if hn is not None: hostname = hn.get('name')
+                if ip: hosts.append({'ip': ip, 'mac': mac, 'hostname': hostname})
+        print(json.dumps(hosts))
+        EOF
+      delegate_to: localhost
+      register: parsed_output
+      changed_when: false
+
+    - name: Set discovered hosts fact
       ansible.builtin.set_fact:
-        discovered_hosts: "{{ lookup('file', '/tmp/' + ansible_hostname + '_scan.xml') | from_xml | parse_nmap_xml }}"
+        discovered_hosts: "{{ parsed_output.stdout | from_json }}"
 
-- name: Sync Discovered Hosts to NetBox
-  hosts: localhost
-  gather_facts: false
-  vars:
-    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
-    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    # =========================================================================
+    # Task 4: Sync to NetBox
+    # =========================================================================
+    - name: Sync discovered devices to NetBox
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "Discovered-{{ item.mac if item.mac else item.ip }}"
+          device_role: "Discovered"
+          device_type: "Generic Host"
+          status: "active"
+          site: "remote-site"
+          tenant: "{{ target_tenant }}"
+        state: present
+      loop: "{{ discovered_hosts }}"
+      when: item.mac != ""
+      ignore_errors: true
 
-  tasks:
-    - name: Load nmap results from all probes
-      ansible.builtin.set_fact:
-        all_discovered_hosts: []
-      # This will aggregate results from hosts
-
-    - name: Parse nmap XML for each host
-      ansible.builtin.set_fact:
-        discovered_hosts: >-
-          {{ (discovered_hosts | default([])) +
-             lookup('file', '/tmp/' + item + '_scan.xml')
-              | community.general.xml_to_dict
-              | parse_discovered_hosts }}
-      loop: "{{ hostvars.keys() | select('match', '^.+\\..+\\.\\..+$') | list }}"
-      register: parsed_results
-      # Note: Simplified - in production, you'd use a proper XML parsing approach
-
-    - name: Example: Create discovered devices in NetBox
+    - name: Sync IP addresses to NetBox (with VRF isolation)
       netbox.netbox.netbox_ip_address:
         netbox_url: "{{ netbox_url }}"
         netbox_token: "{{ netbox_token }}"
         data:
-          address: "{{ item.ip }}/24"
-          tenant: "{{ item.tenant }}"
+          address: "{{ item.ip }}/32"
           status: "active"
-          dns_name: "{{ item.hostname | default(omit) }}"
+          vrf: "{{ vrf_name }}"
+          tenant: "{{ target_tenant }}"
+          dns_name: "{{ item.hostname if item.hostname else omit }}"
+          assigned_object:
+            device: "Discovered-{{ item.mac if item.mac else item.ip }}"
+            name: "eth0"
         state: present
       loop: "{{ discovered_hosts }}"
-      when: discovered_hosts is defined
-      # Note: This is a simplified example. In production, you'd:
-      # 1. Better parse the nmap XML structure
-      # 2. Resolve hostnames via DNS
-      # 3. Use MAC address to identify devices
-      # 4. Handle IP address assignment to interfaces, not just IPs
-      # 5. Use netbox.netbox.netbox_vm or netbox_device as appropriate
+      when: item.mac != ""
       ignore_errors: true
 
-    - name: Discovery summary
-      ansible.builtin.debug:
-        msg: "LAN discovery completed for {{ ansible_play_hosts | length }} probes"
-
-
-# ============================================
-# Helper Playbook for Local Testing
-# ============================================
-- name: Parse Nmap XML (Python script on controller)
-  hosts: localhost
-  gather_facts: false
-  vars:
-    nmap_xml_path: "/tmp/lan_scan_example.xml"
-    tenant_slug: "example-tenant"
-
-  tasks:
-    - name: Parse nmap XML using Python
-      ansible.builtin.script:
-        cmd: "../scripts/parse_nmap.py {{ nmap_xml_path }} {{ tenant_slug }}"
-      register: parsed_hosts
-      changed_when: false
-
-    - name: Display discovered hosts
-      ansible.builtin.debug:
-        var: parsed_hosts.stdout_lines
+    - name: Finalize scan
+      ansible.builtin.file:
+        path: /tmp/scan.xml
+        state: absent
