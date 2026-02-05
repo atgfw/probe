@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -e
+
+lb config noauto \
+    --architecture amd64 \
+    --distribution bookworm \
+    --binary-images iso-hybrid \
+    --mirror-bootstrap http://deb.debian.org/debian/ \
+    --mirror-chroot http://deb.debian.org/debian/ \
+    --mirror-binary http://deb.debian.org/debian/ \
+    --archive-areas "main" \
+    --linux-packages "linux-image" \
+    --bootloaders grub-efi \
+    --iso-application "Network Probe" \
+    --iso-publisher "Probe Discovery System" \
+    --debian-installer live \
+    "${@}"

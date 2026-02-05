@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+
+# ISO Build Artifacts
+*.iso
+iso-builder/chroot/
+iso-builder/binary/
+iso-builder/cache/
+iso-builder/.build/
+iso-builder/*.log
+iso-builder/live-image-*
+
+# OS files
+.DS_Store
+Thumbs.db

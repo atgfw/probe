@@ -1,0 +1,10 @@
+python3
+python3-pip
+python3-requests
+python3-cryptography
+autossh
+nmap
+curl
+ca-certificates
+lsb-release
+sudo

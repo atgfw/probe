@@ -1,0 +1,303 @@
+---
+# Security & Maintenance Playbook
+#
+# This playbook handles:
+# 1. Heartbeat: Update NetBox device status based on connectivity
+# 2. Kill Switch: Remove SSH keys and terminate tunnels for decommissioned probes
+#
+# Usage:
+#   # Run heartbeat check on all probes
+#   ansible-playbook maintenance.yml -i netbox_inventory.ini --tags heartbeat
+#
+#   # Kill a specific probe
+#   ansible-playbook maintenance.yml -i netbox_inventory.ini --tags killswitch -e "target_mac=aa:bb:cc:dd:ee:ff"
+#
+#   # Kill all probes in a tenant
+#   ansible-playbook maintenance.yml -i netbox_inventory.ini --tags killswitch -e "tenant_slug=example"
+
+- name: Probe Maintenance Operations
+  hosts: localhost
+  gather_facts: false
+  vars:
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    proxy_host: "{{ lookup('env', 'PROXY_HOST') }}"
+    proxy_user: "tunnelmgr"
+    # Target variables for killswitch
+    target_mac: "{{ lookup('env', 'TARGET_MAC', '') }}"
+    target_port: "{{ lookup('env', 'TARGET_PORT', '') }}"
+    tenant_slug: "{{ lookup('env', 'TENANT_SLUG', '') }}"
+
+  tasks:
+    - name: Validate NetBox connection
+      uri:
+        url: "{{ netbox_url }}/api/"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: false
+      register: netbox_status
+
+    - name: NetBox connection confirmed
+      ansible.builtin.debug:
+        msg: "Connected to NetBox at {{ netbox_url }}"
+
+
+# ============================================
+# Playbook 1: Heartbeat Check
+# ============================================
+- name: Check Probe Heartbeat
+  hosts: probes
+  gather_facts: false
+  serial: 50  # Process in batches to avoid overwhelming NetBox
+  vars:
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+
+  tasks:
+    - name: Ping probe via SSH tunnel
+      ansible.builtin.wait_for:
+        host: localhost
+        port: "{{ ansible_ssh_port }}"
+        timeout: 10
+      register: ping_result
+      ignore_errors: true
+
+    - name: Update NetBox device status (Online)
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ inventory_hostname }}"
+          status: "active"
+        state: present
+      when: ping_result is succeeded
+
+    - name: Update NetBox device status (Offline)
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ inventory_hostname }}"
+          status: "offline"
+        state: present
+      when: ping_result is failed
+
+    - name: Mark NetBox device as decommissioned after 3 failures
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ inventory_hostname }}"
+          status: "decommissioning"
+        state: present
+      when:
+        - ping_result is failed
+        - ansible_failed_attempts is defined
+        - ansible_failed_attempts >= 3
+
+
+# ============================================
+# Playbook 2: Kill Switch
+# ============================================
+- name: Kill Switch - Decommission Probe(s)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    proxy_host: "{{ lookup('env', 'PROXY_HOST') }}"
+    proxy_user: "tunnelmgr"
+    target_mac: "{{ lookup('env', 'TARGET_MAC', '') }}"
+    target_port: "{{ lookup('env', 'TARGET_PORT', '') }}"
+    tenant_slug: "{{ lookup('env', 'TENANT_SLUG', '') }}"
+    authorized_keys_path: "/home/{{ proxy_user }}/.ssh/authorized_keys"
+
+  tasks:
+    - name: Require at least one target filter
+      ansible.builtin.fail:
+        msg: "Must specify TARGET_MAC, TARGET_PORT, or TENANT_SLUG"
+      when:
+        - target_mac == ""
+        - target_port == ""
+        - tenant_slug == ""
+
+    # ============================================
+    # Find Target Device(s)
+    # ============================================
+    - name: Find device by MAC address
+      uri:
+        url: "{{ netbox_url }}/api/dcim/devices/?name={{ 'probe-' + target_mac | regex_replace(':', '') }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: false
+      register: mac_search
+      when: target_mac != ""
+      ignore_errors: true
+
+    - name: Find device by port number
+      uri:
+        url: "{{ netbox_url }}/api/dcim/devices/?cf_automation_proxy_port={{ target_port }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: false
+      register: port_search
+      when: target_port != ""
+      ignore_errors: true
+
+    - name: Find devices by tenant
+      uri:
+        url: "{{ netbox_url }}/api/dcim/devices/?tenant={{ tenant_slug }}"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: false
+      register: tenant_search
+      when: tenant_slug != ""
+      ignore_errors: true
+
+    - name: Compile target devices list
+      ansible.builtin.set_fact:
+        target_devices: >-
+          {{ (mac_search.results | default([])) +
+             (port_search.results | default([])) +
+             (tenant_search.results | default([])) | unique }}
+
+    - name: Display targets
+      ansible.builtin.debug:
+        msg: "Found {{ target_devices | length }} device(s) to decommission"
+
+    # ============================================
+    # Execute Kill Switch
+    # ============================================
+    - name: Remove SSH key from authorized_keys (by MAC)
+      ansible.builtin.blockinfile:
+        path: "{{ authorized_keys_path }}"
+        marker: "# {mark} Probe probe-{{ target_mac | regex_replace(':', '') }}"
+        block: ""
+        state: absent
+      delegate_to: "{{ proxy_host }}"
+      become: true
+      when: target_mac != ""
+      register: mac_key_removal
+
+    - name: Remove SSH key from authorized_keys (by port)
+      ansible.builtin.blockinfile:
+        path: "{{ authorized_keys_path }}"
+        marker: "# {mark} Probe .* (port {{ target_port }})"
+        block: ""
+        state: absent
+      delegate_to: "{{ proxy_host }}"
+      become: true
+      when: target_port != ""
+      register: port_key_removal
+
+    - name: Remove SSH keys from authorized_keys (by tenant)
+      ansible.builtin.lineinfile:
+        path: "{{ authorized_keys_path }}"
+        regexp: '.*Probe .* \(port .+\)$'
+        state: absent
+      delegate_to: "{{ proxy_host }}"
+      become: true
+      when: tenant_slug != ""
+      register: tenant_key_removal
+
+    # ============================================
+    # Kill Tunnel Processes
+    # ============================================
+    - name: Kill autossh process for specific port
+      ansible.builtin.shell: |
+        pkill -f "autossh.*-R {{ target_port }}:"
+      delegate_to: "{{ proxy_host }}"
+      become: true
+      when: target_port != ""
+      register: process_kill
+      ignore_errors: true
+
+    - name: Kill autossh processes by port pattern
+      ansible.builtin.shell: |
+        for port in $(awk '/Probe .* \(port/ {match($0, /\(([0-9]+)\)/, m); print m[1]}' {{ authorized_keys_path }}); do
+          pkill -f "autossh.*-R ${port}:"
+        done
+      delegate_to: "{{ proxy_host }}"
+      become: true
+      when: tenant_slug != ""
+      register: batch_kill
+      ignore_errors: true
+
+    # ============================================
+    # Update NetBox Device Status
+    # ============================================
+    - name: Update device status to decommissioned
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ item.name }}"
+          status: "decommissioned"
+        state: present
+      loop: "{{ target_devices }}"
+      when: target_devices is defined
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ============================================
+    # Cleanup
+    # ============================================
+    - name: Disable systemd service (if local access)
+      ansible.posix.systemd:
+        name: "autossh-probe-{{ target_port }}"
+        state: stopped
+        enabled: false
+      when: target_port != ""
+      ignore_errors: true
+
+    - name: Summary of kill switch execution
+      ansible.builtin.debug:
+        msg:
+          - "MAC-based key removal: {{ 'completed' if mac_key_removal is defined else 'N/A' }}"
+          - "Port-based key removal: {{ 'completed' if port_key_removal is defined else 'N/A' }}"
+          - "Tenant-based key removal: {{ 'completed' if tenant_key_removal is defined else 'N/A' }}"
+          - "Process kill: {{ 'completed' if process_kill.changed or batch_kill.changed else 'N/A' }}"
+          - "Devices updated: {{ target_devices | default([]) | length }}"
+
+
+# ============================================
+# Playbook 3: Cleanup Maintenance
+# ============================================
+- name: Cleanup Stale NetBox Entries
+  hosts: localhost
+  gather_facts: false
+  vars:
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    stale_days: 90  # Devices offline for >90 days
+
+  tasks:
+    - name: Find stale offline devices
+      uri:
+        url: "{{ netbox_url }}/api/dcim/devices/?status=offline"
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: false
+      register: offline_devices
+
+    - name: List stale devices
+      ansible.builtin.debug:
+        msg: "Found {{ offline_devices.json.results | length }} offline devices"
+
+    - name: Archive decommissioned devices
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ item.name }}"
+          status: "decommissioned"
+        state: present
+      loop: "{{ offline_devices.json.results }}"
+      when: offline_devices.json.results is defined
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Maintenance cleanup complete
+      ansible.builtin.debug:
+        msg: "Stale device maintenance completed"

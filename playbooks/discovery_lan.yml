@@ -1,0 +1,151 @@
+---
+# LAN Discovery Playbook
+#
+# This playbook runs on registered probes to discover devices on their
+# local networks and synchronize discovered IP addresses to NetBox.
+#
+# Usage:
+#   ansible-playbook discovery_lan.yml -i netbox_inventory.ini
+#
+# Requires:
+#   - nmap installed on probe
+#   - NetBox credentials
+
+- name: Discover LAN Devices on Probe
+  hosts: probes
+  gather_facts: true
+  become: true
+  vars:
+    # Local subnets to scan (can be overridden per host)
+    local_subnets: "{{ probe_subnets | default('192.168.1.0/24,10.0.0.0/24') }}"
+    nmap_args: "-sn"  # Ping scan only
+    nmap_output: "/tmp/lan_scan_{{ ansible_hostname }}.xml"
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+
+  tasks:
+    - name: Display probe information
+      ansible.builtin.debug:
+        msg:
+          - "Hostname: {{ ansible_hostname }}"
+          - "MAC: {{ ansible_default_ipv4.macaddress }}"
+          - "Primary IP: {{ ansible_default_ipv4.address }}"
+          - "Scanning subnets: {{ local_subnets }}"
+
+    # ============================================
+    # Task 1: Run Nmap Scan
+    # ============================================
+    - name: Check if nmap is installed
+      ansible.builtin.command: which nmap
+      register: nmap_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Install nmap if missing (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: nmap
+        state: present
+        update_cache: yes
+      when:
+        - ansible_os_family == "Debian"
+        - nmap_check.rc != 0
+      become: true
+
+    - name: Install nmap if missing (RHEL/CentOS)
+      ansible.builtin.yum:
+        name: nmap
+        state: present
+      when:
+        - ansible_os_family == "RedHat"
+        - nmap_check.rc != 0
+      become: true
+
+    - name: Run nmap ping scan
+      ansible.builtin.command:
+        cmd: "nmap {{ nmap_args }} {{ local_subnets }} -oX {{ nmap_output }}"
+      register: nmap_result
+      changed_when: true
+
+    - name: Fetch nmap XML results
+      ansible.builtin.fetch:
+        src: "{{ nmap_output }}"
+        dest: "/tmp/{{ ansible_hostname }}_scan.xml"
+        flat: true
+      become: false
+
+    # ============================================
+    # Task 2: Parse Nmap XML (on localhost)
+    # ============================================
+    - name: Parse nmap results on localhost
+      ansible.builtin.set_fact:
+        discovered_hosts: "{{ lookup('file', '/tmp/' + ansible_hostname + '_scan.xml') | from_xml | parse_nmap_xml }}"
+
+- name: Sync Discovered Hosts to NetBox
+  hosts: localhost
+  gather_facts: false
+  vars:
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+
+  tasks:
+    - name: Load nmap results from all probes
+      ansible.builtin.set_fact:
+        all_discovered_hosts: []
+      # This will aggregate results from hosts
+
+    - name: Parse nmap XML for each host
+      ansible.builtin.set_fact:
+        discovered_hosts: >-
+          {{ (discovered_hosts | default([])) +
+             lookup('file', '/tmp/' + item + '_scan.xml')
+              | community.general.xml_to_dict
+              | parse_discovered_hosts }}
+      loop: "{{ hostvars.keys() | select('match', '^.+\\..+\\.\\..+$') | list }}"
+      register: parsed_results
+      # Note: Simplified - in production, you'd use a proper XML parsing approach
+
+    - name: Example: Create discovered devices in NetBox
+      netbox.netbox.netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          address: "{{ item.ip }}/24"
+          tenant: "{{ item.tenant }}"
+          status: "active"
+          dns_name: "{{ item.hostname | default(omit) }}"
+        state: present
+      loop: "{{ discovered_hosts }}"
+      when: discovered_hosts is defined
+      # Note: This is a simplified example. In production, you'd:
+      # 1. Better parse the nmap XML structure
+      # 2. Resolve hostnames via DNS
+      # 3. Use MAC address to identify devices
+      # 4. Handle IP address assignment to interfaces, not just IPs
+      # 5. Use netbox.netbox.netbox_vm or netbox_device as appropriate
+      ignore_errors: true
+
+    - name: Discovery summary
+      ansible.builtin.debug:
+        msg: "LAN discovery completed for {{ ansible_play_hosts | length }} probes"
+
+
+# ============================================
+# Helper Playbook for Local Testing
+# ============================================
+- name: Parse Nmap XML (Python script on controller)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    nmap_xml_path: "/tmp/lan_scan_example.xml"
+    tenant_slug: "example-tenant"
+
+  tasks:
+    - name: Parse nmap XML using Python
+      ansible.builtin.script:
+        cmd: "../scripts/parse_nmap.py {{ nmap_xml_path }} {{ tenant_slug }}"
+      register: parsed_hosts
+      changed_when: false
+
+    - name: Display discovered hosts
+      ansible.builtin.debug:
+        var: parsed_hosts.stdout_lines

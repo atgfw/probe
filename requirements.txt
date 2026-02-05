@@ -1,0 +1,24 @@
+# NetBox API client
+pynetbox>=7.3.0
+
+# FastAPI dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# HTTP client
+httpx>=0.25.0
+requests>=2.31.0
+
+# SSH key generation
+cryptography>=41.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# XML parsing for nmap
+lxml>=4.9.0
+
+# Logging
+python-json-logger>=2.0.7

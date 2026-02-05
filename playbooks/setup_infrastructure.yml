@@ -1,0 +1,243 @@
+---
+# Infrastructure Setup Playbook
+#
+# This playbook sets up the initial infrastructure for the probe discovery system:
+# - Creates NetBox custom fields
+# - Configures Proxy server
+# - Sets up Gatekeeper service
+# - Creates initial NetBox objects
+
+- name: Setup Proxy Server
+  hosts: proxy
+  become: true
+  vars:
+    gatekeeper_user: gatekeeper
+    tunnelmgr_user: tunnelmgr
+    gatekeeper_dir: /opt/gatekeeper
+
+  tasks:
+    - name: Ensure required packages are installed
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - autossh
+          - nmap
+        state: present
+        update_cache: yes
+
+    - name: Create tunnelmgr user
+      ansible.builtin.user:
+        name: "{{ tunnelmgr_user }}"
+        system: false
+        shell: /bin/bash
+        home: "/home/{{ tunnelmgr_user }}"
+        create_home: true
+
+    - name: Setup SSH directory for tunnelmgr
+      ansible.builtin.file:
+        path: "/home/{{ tunnelmgr_user }}/.ssh"
+        state: directory
+        owner: "{{ tunnelmgr_user }}"
+        group: "{{ tunnelmgr_user }}"
+        mode: '0700'
+
+    - name: Create authorized_keys for tunnelmgr
+      ansible.builtin.file:
+        path: "/home/{{ tunnelmgr_user }}/.ssh/authorized_keys"
+        state: touch
+        owner: "{{ tunnelmgr_user }}"
+        group: "{{ tunnelmgr_user }}"
+        mode: '0600'
+
+    - name: Create gatekeeper user
+      ansible.builtin.user:
+        name: "{{ gatekeeper_user }}"
+        system: true
+        shell: /bin/false
+        home: "{{ gatekeeper_dir }}"
+        create_home: false
+
+    - name: Create gatekeeper directory
+      ansible.builtin.file:
+        path: "{{ gatekeeper_dir }}"
+        state: directory
+        owner: "{{ gatekeeper_user }}"
+        group: "{{ gatekeeper_user }}"
+        mode: '0755'
+
+    - name: Copy gatekeeper files
+      ansible.builtin.copy:
+        src: "../{{ item }}"
+        dest: "{{ gatekeeper_dir }}/{{ item }}"
+        owner: "{{ gatekeeper_user }}"
+        group: "{{ gatekeeper_user }}"
+        mode: '0644'
+      loop:
+        - gatekeeper.py
+        - requirements.txt
+
+    - name: Create Python virtual environment for gatekeeper
+      ansible.builtin.pip:
+        requirements: "{{ gatekeeper_dir }}/requirements.txt"
+        virtualenv: "{{ gatekeeper_dir }}/venv"
+        virtualenv_command: /usr/bin/python3 -m venv
+
+    - name: Create gatekeeper environment file
+      ansible.builtin.template:
+        src: "../.env.example"
+        dest: "{{ gatekeeper_dir }}/.env"
+        owner: "{{ gatekeeper_user }}"
+        group: "{{ gatekeeper_user }}"
+        mode: '0600'
+
+    - name: Create log directory
+      ansible.builtin.file:
+        path: /var/log/gatekeeper
+        state: directory
+        owner: "{{ gatekeeper_user }}"
+        group: "{{ gatekeeper_user }}"
+        mode: '0755'
+
+    - name: Copy gatekeeper systemd service
+      ansible.builtin.copy:
+        src: "../gatekeeper.service"
+        dest: /etc/systemd/system/gatekeeper.service
+        mode: '0644'
+
+    - name: Reload systemd and enable gatekeeper
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        name: gatekeeper
+        enabled: yes
+        state: started
+
+    - name: Wait for gatekeeper to start
+      ansible.builtin.wait_for:
+        port: 8000
+        timeout: 30
+
+    - name: Verify gatekeeper health
+      ansible.builtin.uri:
+        url: "http://localhost:8000/health"
+        return_content: yes
+      register: health_check
+
+    - name: Display gatekeeper status
+      ansible.builtin.debug:
+        msg: "Gatekeeper is healthy: {{ health_check.json.status }}"
+
+
+- name: Setup NetBox Custom Fields
+  hosts: localhost
+  connection: local
+  vars:
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+
+  tasks:
+    - name: Create NetBox custom field for proxy port
+      uri:
+        url: "{{ netbox_url }}/api/extras/custom-fields/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          content_types:
+            - "dcim.device"
+          type: "integer"
+          name: "automation_proxy_port"
+          label: "Automation Proxy Port"
+          description: "Port assigned for reverse SSH tunnel to proxy"
+          required: false
+          ui_visibility: "read-only"
+        validate_certs: false
+        status_code: [201, 400]  # 201 created, 400 already exists
+      register: custom_field_result
+
+    - name: Custom field creation result
+      ansible.builtin.debug:
+        msg: "{{ 'Created' if custom_field_result.status == 201 else 'Already exists' }}: automation_proxy_port"
+
+
+- name: Setup Probe on Target
+  hosts: probes
+  become: true
+  vars:
+    probe_dir: /opt/probe
+
+  tasks:
+    - name: Ensure required packages are installed
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - autossh
+          - nmap
+        state: present
+        update_cache: yes
+
+    - name: Create probe directory
+      ansible.builtin.file:
+        path: "{{ probe_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy probe files
+      ansible.builtin.copy:
+        src: "../{{ item }}"
+        dest: "{{ probe_dir }}/{{ item }}"
+        mode: '0755'
+      loop:
+        - bootstrap_probe.py
+        - requirements.txt
+
+    - name: Install Python dependencies
+      ansible.builtin.pip:
+        requirements: "{{ probe_dir }}/requirements.txt"
+
+    - name: Check if probe config exists
+      ansible.builtin.stat:
+        path: /boot/probe_config.txt
+      register: probe_config
+
+    - name: Create probe config template
+      ansible.builtin.copy:
+        dest: /boot/probe_config.txt
+        content: |
+          TENANT_SLUG={{ tenant_slug | default('default') }}
+        mode: '0644'
+      when: not probe_config.stat.exists
+
+    - name: Copy bootstrap systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/probe-bootstrap.service
+        content: |
+          [Unit]
+          Description=Probe Bootstrap Registration
+          After=network-online.target
+          Wants=network-online.target
+          ConditionPathExists=!/var/lib/probe_bootstrap_complete
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 {{ probe_dir }}/bootstrap_probe.py
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Enable probe bootstrap service
+      ansible.builtin.systemd:
+        daemon_reload: yes
+        name: probe-bootstrap
+        enabled: yes
+
+    - name: Probe setup complete
+      ansible.builtin.debug:
+        msg: "Probe {{ inventory_hostname }} is ready. Configure TENANT_SLUG in /boot/probe_config.txt and run 'systemctl start probe-bootstrap'"

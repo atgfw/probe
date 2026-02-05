@@ -1,0 +1,14 @@
+[Unit]
+Description=Probe Bootstrap Registration
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/probe_bootstrap_complete
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/probe/bootstrap_probe.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

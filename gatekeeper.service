@@ -1,0 +1,25 @@
+[Unit]
+Description=Gatekeeper API - NetBox Port Assignment Manager
+After=network.target
+
+[Service]
+Type=simple
+User=gatekeeper
+Group=gatekeeper
+WorkingDirectory=/opt/gatekeeper
+Environment="PATH=/opt/gatekeeper/venv/bin"
+Environment="GATEKEEPER_PORT=8000"
+Environment="GATEKEEPER_HOST=0.0.0.0"
+EnvironmentFile=-/opt/gatekeeper/.env
+ExecStart=/opt/gatekeeper/venv/bin/python -m uvicorn gatekeeper:app --host ${GATEKEEPER_HOST} --port ${GATEKEEPER_PORT}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

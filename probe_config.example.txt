@@ -1,0 +1,14 @@
+# Probe Configuration File
+#
+# Place this file at /boot/probe_config.txt on the probe
+#
+# Only required variable:
+# TENANT_SLUG - Must match a tenant slug in NetBox
+#
+# Optional variables (can also be set via environment):
+# GATEKEEPER_URL - URL of gatekeeper API (default: http://localhost:8000)
+# AWX_CALLBACK_URL - AWX provisioning callback URL
+# PROXY_HOST - Proxy server hostname (default: proxy.example.com)
+# PROXY_USER - Proxy SSH user (default: tunnelmgr)
+
+TENANT_SLUG=example-tenant

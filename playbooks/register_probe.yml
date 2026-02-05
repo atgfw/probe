@@ -1,0 +1,213 @@
+---
+# AWX Registration Playbook
+#
+# This playbook is triggered by the probe bootstrap callback to:
+# 1. Append the probe's SSH public key to the proxy's authorized_keys
+# 2. Create or update the probe device in NetBox
+# 3. Trigger AWX inventory synchronization
+#
+# Expected variables from callback:
+#   - mac: Probe MAC address
+#   - proxy_port: Assigned proxy port
+#   - tenant_slug: Tenant identifier
+#   - public_key: SSH public key
+
+- name: Register Probe with NetBox and Proxy
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # These should be set via AWX job template or inventory variables
+    netbox_url: "{{ lookup('env', 'NETBOX_URL') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    proxy_host: "{{ lookup('env', 'PROXY_HOST') }}"
+    proxy_user: "tunnelmgr"
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.fail:
+        msg: "Required variable {{ item }} is not defined"
+      when: vars[item] is not defined
+      loop:
+        - mac
+        - proxy_port
+        - tenant_slug
+        - public_key
+
+    - name: Normalize MAC address
+      ansible.builtin.set_fact:
+        mac_normalized: >-
+          {{ mac | lower | regex_replace('[^a-f0-9]', '') |
+             regex_replace('([a-f0-9]{2})(?!$)', '\\1:') }}
+
+    - name: Set device name
+      ansible.builtin.set_fact:
+        device_name: "probe-{{ mac_normalized }}"
+
+    - name: Display probe information
+      ansible.builtin.debug:
+        msg:
+          - "Device: {{ device_name }}"
+          - "MAC: {{ mac_normalized }}"
+          - "Port: {{ proxy_port }}"
+          - "Tenant: {{ tenant_slug }}"
+
+    # ============================================
+    # Task 1: Add SSH Key to Proxy Authorized Keys
+    # ============================================
+    - name: Add probe public key to proxy authorized_keys
+      ansible.builtin.blockinfile:
+        path: "/home/{{ proxy_user }}/.ssh/authorized_keys"
+        create: yes
+        mode: '0600'
+        owner: "{{ proxy_user }}"
+        group: "{{ proxy_user }}"
+        marker: "# {mark} Probe {{ device_name }} (port {{ proxy_port }})"
+        block: |
+          command="/bin/false",no-pty,no-X11-forwarding,no-agent-forwarding {{ public_key }}
+        state: present
+      delegate_to: "{{ proxy_host }}"
+      become: true
+      register: auth_keys_result
+
+    - name: SSH key addition result
+      ansible.builtin.debug:
+        msg: "SSH key {{ 'added' if auth_keys_result.changed else 'already exists' }}"
+
+    # ============================================
+    # Task 2: Create/Update NetBox Device
+    # ============================================
+    - name: Get tenant from NetBox
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/tenancy/tenants/?slug={{ tenant_slug }}"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: true
+      register: tenant_response
+
+    - name: Fail if tenant not found
+      ansible.builtin.fail:
+        msg: "Tenant '{{ tenant_slug }}' not found in NetBox"
+      when: tenant_response.json.count == 0
+
+    - name: Set tenant info
+      ansible.builtin.set_fact:
+        tenant_info: "{{ tenant_response.json.results[0] }}"
+
+    - name: Get device role for probes
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/dcim/device-roles/?slug=network-probe"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_token }}"
+        validate_certs: true
+      register: role_response
+      ignore_errors: true
+
+    - name: Set device role (use found or default to 1)
+      ansible.builtin.set_fact:
+        device_role_id: "{{ role_response.json.results[0].id | default(1) }}"
+
+    # Gatekeeper creates a 'pending' device to reserve the port atomically.
+    # This task updates that device with full details (tenant, site, status=active).
+    # If the device doesn't exist for some reason, it will be created.
+    - name: Create or update device in NetBox
+      netbox.netbox.netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ device_name }}"
+          device_role: "{{ device_role_id }}"
+          device_type: "network-probe"
+          tenant: "{{ tenant_info.id }}"
+          site: "remote-site"
+          status: "active"
+          custom_fields:
+            automation_proxy_port: "{{ proxy_port }}"
+        state: present
+      register: device_result
+
+    - name: Device registration result
+      ansible.builtin.debug:
+        msg: "Device {{ 'created' if device_result.changed else 'already registered' }} - {{ device_name }} (port {{ proxy_port }})"
+
+    # Note: NetBox 4.0+ treats MAC addresses as separate objects
+    # We create the interface first, then create/link the MAC address
+    - name: Create management interface in NetBox
+      netbox.netbox.netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          device: "{{ device_name }}"
+          name: "eth0"
+          type: "1000base-t"
+          enabled: true
+        state: present
+      register: interface_result
+      ignore_errors: true
+
+    - name: Interface creation result
+      ansible.builtin.debug:
+        msg: "Interface {{ 'created' if interface_result.changed else 'already exists' }}"
+
+    # NetBox 4.0+: Create MAC address object and assign to interface
+    - name: Create MAC address object and assign to interface
+      netbox.netbox.netbox_mac_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          mac_address: "{{ mac_normalized }}"
+          assigned_object:
+            device: "{{ device_name }}"
+            name: "eth0"
+          description: "Probe management interface MAC"
+        state: present
+      register: mac_result
+      ignore_errors: true
+
+    - name: MAC address creation result
+      ansible.builtin.debug:
+        msg: "MAC address {{ 'created' if mac_result.changed else 'already exists' }}"
+
+    # ============================================
+    # Task 4: Trigger AWX Inventory Sync
+    # ============================================
+    - name: Trigger AWX inventory sync
+      uri:
+        url: "{{ lookup('env', 'AWX_API_URL') }}/api/v2/inventories/{{ lookup('env', 'AWX_INVENTORY_ID') }}/update_inventory_sources/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lookup('env', 'AWX_OAUTH_TOKEN') }}"
+          Content-Type: "application/json"
+        body_format: json
+        validate_certs: false
+      register: sync_result
+      when: lookup('env', 'AWX_API_URL') != "" and lookup('env', 'AWX_INVENTORY_ID') != ""
+      ignore_errors: true
+
+    - name: Inventory sync result
+      ansible.builtin.debug:
+        msg: "Inventory sync triggered"
+      when: sync_result.skipped is not defined
+
+    # ============================================
+    # Task 5: Set Custom Facts for Probe
+    # ============================================
+    - name: Add probe to Ansible inventory group
+      ansible.builtin.add_host:
+        name: "{{ device_name }}"
+        groups: probes, probes_{{ tenant_slug }}
+        ansible_host: "localhost"
+        ansible_port: "{{ proxy_port }}"
+        ansible_user: "root"
+        ansible_ssh_common_args: "-o ProxyJump={{ proxy_user }}@{{ proxy_host }}"
+        ansible_ssh_private_key_file: "/home/tunnelmgr/.ssh/id_ed25519"
+      changed_when: false
+
+    - name: Registration complete
+      ansible.builtin.debug:
+        msg:
+          - "Registration completed successfully"
+          - "Device: {{ device_name }}"
+          - "Port: {{ proxy_port }}"
+          - "Tenant: {{ tenant_slug }}"

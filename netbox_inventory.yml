@@ -1,0 +1,52 @@
+---
+# NetBox Dynamic Inventory Configuration for AWX/Ansible
+
+plugin: netbox.netbox.nb_inventory
+api_url: https://netbox.example.com
+token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+validate_certs: false
+
+# Query parameters
+query_filters:
+  - has_primary_ip: true
+  - status: active
+  - tenant_slug: "{{ lookup('env', 'TENANT_SLUG') | default(omit) }}"
+
+# Grouping
+group_by:
+  - device_role
+  - status
+  - site
+  - tenant
+  - manufacturer
+
+# Compose variables
+compose:
+  ansible_host: primary_ip.address.split('/')[0]
+  ansible_port: custom_fields.automation_proxy_port | default(22)
+  # Use SSH tunnel via proxy
+  ansible_ssh_common_args: "-o ProxyJump=tunnelmgr@{{ lookup('env', 'PROXY_HOST') }}"
+
+# Group name templates
+group_names_raw: false
+ keyed_groups:
+  - prefix: probe
+    key: custom_fields.automation_proxy_port
+
+# Device filters (uncomment as needed)
+# device_types:
+#   - network-probe
+# roles:
+#   - network-probe
+
+# Platform defaults (for Debian/Raspbian)
+platforms:
+  - debian
+  - raspbian
+
+# Inventory refresh interval (seconds)
+cache: true
+cache_plugin: ansible.builtin.jsonfile
+cache_prefix: netbox
+cache_timeout: 1800
+cache_connection: /tmp/ansible_netbox_inventory
