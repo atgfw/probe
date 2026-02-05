@@ -51,7 +51,8 @@ SYSTEMD_DIR = Path("/etc/systemd/system")
 # Environment variables or defaults
 # Note: These are baked into the ISO but can be overridden by env vars
 GATEKEEPER_URL = os.getenv("GATEKEEPER_URL", "http://167.99.59.231:8000")
-AWX_CALLBACK_URL = os.getenv("AWX_CALLBACK_URL")
+AWX_CALLBACK_URL = os.getenv("AWX_CALLBACK_URL", "https://awx.atgfw.com/api/v2/job_templates/45/callback/")
+AWX_HOST_CONFIG_KEY = os.getenv("AWX_HOST_CONFIG_KEY", "probe-bootstrap-atg-2026")
 PROXY_HOST = os.getenv("PROXY_HOST", "167.99.59.231")
 PROXY_USER = os.getenv("PROXY_USER", "tunnelmgr")
 
@@ -286,7 +287,8 @@ def call_awx_callback(mac: str, proxy_port: int, tenant_slug: str, public_key: s
         "tenant_slug": tenant_slug,
         "public_key": public_key,
         "hostname": socket.gethostname(),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "host_config_key": AWX_HOST_CONFIG_KEY
     }
 
     try:
