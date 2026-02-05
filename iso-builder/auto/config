@@ -11,7 +11,7 @@ lb config noauto \
     --mirror-binary http://deb.debian.org/debian/ \
     --archive-areas "main" \
     --linux-packages "linux-image" \
-    --bootloaders grub-efi \
+    --bootloaders syslinux,grub-efi \
     --iso-application "Network Probe" \
     --iso-publisher "Probe Discovery System" \
     --debian-installer live \
