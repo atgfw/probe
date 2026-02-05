@@ -90,6 +90,21 @@
       ansible.builtin.set_fact:
         tenant_info: "{{ tenant_result.tenant }}"
 
+    - name: Ensure VRF exists for tenant in NetBox
+      netbox.netbox.netbox_vrf:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ tenant_slug | upper }}-VRF"
+          tenant: "{{ tenant_info.id }}"
+          enforce_unique: false
+        state: present
+      register: vrf_result
+
+    - name: Set VRF info
+      ansible.builtin.set_fact:
+        vrf_info: "{{ vrf_result.vrf }}"
+
     - name: Get device role for probes
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/dcim/device-roles/?slug=network-probe"
