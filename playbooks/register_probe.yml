@@ -9,7 +9,10 @@
 # Expected variables from callback:
 #   - mac: Probe MAC address
 #   - proxy_port: Assigned proxy port
-#   - tenant_slug: Tenant identifier
+#   - tenant_name: Tenant Display Name (e.g., "Christian Care")
+#   - tenant_slug: Tenant slug (e.g., "christian_care")
+#   - site_name: Site Display Name (e.g., "Main Campus")
+#   - site_slug: Site slug (e.g., "main_campus")
 #   - public_key: SSH public key
 
 - name: Register Probe with NetBox and Proxy
@@ -30,7 +33,10 @@
       loop:
         - mac
         - proxy_port
+        - tenant_name
         - tenant_slug
+        - site_name
+        - site_slug
         - public_key
 
     - name: Normalize MAC address
@@ -49,7 +55,8 @@
           - "Device: {{ device_name }}"
           - "MAC: {{ mac_normalized }}"
           - "Port: {{ proxy_port }}"
-          - "Tenant: {{ tenant_slug }}"
+          - "Tenant: {{ tenant_name }} ({{ tenant_slug }})"
+          - "Site: {{ site_name }} ({{ site_slug }})"
 
     # ============================================
     # Task 1: Add SSH Key to Proxy Authorized Keys
@@ -81,7 +88,7 @@
         netbox_url: "{{ netbox_url }}"
         netbox_token: "{{ netbox_token }}"
         data:
-          name: "{{ tenant_slug | title }}"
+          name: "{{ tenant_name }}"
           slug: "{{ tenant_slug }}"
         state: present
       register: tenant_result
@@ -114,7 +121,7 @@
         netbox_url: "{{ netbox_url }}"
         netbox_token: "{{ netbox_token }}"
         data:
-          name: "{{ site_slug | title }}"
+          name: "{{ site_name }}"
           slug: "{{ site_slug }}"
           tenant: "{{ tenant_info.id }}"
           status: "active"
@@ -241,4 +248,5 @@
           - "Registration completed successfully"
           - "Device: {{ device_name }}"
           - "Port: {{ proxy_port }}"
-          - "Tenant: {{ tenant_slug }}"
+          - "Tenant: {{ tenant_name }}"
+          - "Site: {{ site_name }}"

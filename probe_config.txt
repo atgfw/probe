@@ -1,2 +1,2 @@
-TENANT_SLUG=applied-technology-group-inc
-SITE_SLUG=lakota
+TENANT_NAME=Applied Technology Group, Inc.
+SITE_NAME=Lakota

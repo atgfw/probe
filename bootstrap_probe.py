@@ -57,17 +57,40 @@ PROXY_HOST = os.getenv("PROXY_HOST", "167.99.59.231")
 PROXY_USER = os.getenv("PROXY_USER", "tunnelmgr")
 
 
-def read_config() -> tuple[str, str]:
+def slugify(text: str) -> str:
     """
-    Read TENANT_SLUG and SITE_SLUG from available config paths.
+    Convert text to a URL-safe slug (lowercase, underscores).
+    
+    Args:
+        text: Input string
+        
+    Returns:
+        Slugified string
+    """
+    if not text:
+        return ""
+    import re
+    # Lowercase, replace all non-alphanumeric characters with underscores
+    text = text.lower().strip()
+    text = re.sub(r'[^\w]+', '_', text)
+    # Collapse consecutive underscores and strip them from the ends
+    text = re.sub(r'_+', '_', text)
+    return text.strip('_')
+
+
+def read_config() -> tuple:
+    """
+    Read TENANT_NAME/SLUG and SITE_NAME/SLUG from available config paths.
 
     Returns:
-        Tuple of (tenant_slug, site_slug)
+        Tuple of (tenant_name, tenant_slug, site_name, site_slug)
 
     Raises:
-        RuntimeError: If no config file found or tenant slug not found
+        RuntimeError: If no config file found or tenant info not found
     """
+    tenant_name = None
     tenant_slug = None
+    site_name = None
     site_slug = None
 
     for config_path in CONFIG_PATHS:
@@ -80,21 +103,38 @@ def read_config() -> tuple[str, str]:
             with open(path, 'r') as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith('TENANT_SLUG='):
-                        tenant_slug = line.split('=', 1)[1].strip().strip('"\'')
-                    elif line.startswith('SITE_SLUG='):
-                        site_slug = line.split('=', 1)[1].strip().strip('"\'')
+                    if not line or line.startswith('#'):
+                        continue
+                        
+                    if '=' in line:
+                        key, val = line.split('=', 1)
+                        key = key.strip()
+                        val = val.strip().strip('"\'')
+                        
+                        if key == 'TENANT_NAME': tenant_name = val
+                        elif key == 'TENANT_SLUG': tenant_slug = val
+                        elif key == 'SITE_NAME': site_name = val
+                        elif key == 'SITE_SLUG': site_slug = val
             
+            # Prioritize Names and derive slugs if missing
+            if tenant_name:
+                derived_tenant_slug = tenant_slug if tenant_slug else slugify(tenant_name)
+                # Site defaults to tenant if missing
+                final_site_name = site_name if site_name else tenant_name
+                final_site_slug = site_slug if site_slug else (slugify(site_name) if site_name else derived_tenant_slug)
+                
+                logger.info(f"Loaded config: Tenant='{tenant_name}' ({derived_tenant_slug}), Site='{final_site_name}' ({final_site_slug})")
+                return tenant_name, derived_tenant_slug, final_site_name, final_site_slug
+            
+            # Fallback to pure slug if that's all we have (backwards compat)
             if tenant_slug:
-                logger.info(f"Found tenant slug: {tenant_slug}")
-                # SITE_SLUG is optional, default to tenant_slug if missing
                 final_site_slug = site_slug if site_slug else tenant_slug
-                logger.info(f"Using site slug: {final_site_slug}")
-                return tenant_slug, final_site_slug
+                return tenant_slug.title(), tenant_slug, (site_slug.title() if site_slug else tenant_slug.title()), final_site_slug
+
         except Exception as e:
             logger.warning(f"Error reading {config_path}: {e}")
 
-    raise RuntimeError(f"TENANT_SLUG not found in any of: {', '.join(CONFIG_PATHS)}")
+    raise RuntimeError(f"Tenant configuration not found in any of: {', '.join(CONFIG_PATHS)}")
 
 
 def get_mac_address(interface: str = NETWORK_INTERFACE) -> str:
@@ -273,15 +313,17 @@ WantedBy=multi-user.target
         raise RuntimeError(f"Failed to create systemd service: {e}")
 
 
-def call_awx_callback(mac: str, proxy_port: int, tenant_slug: str, site_slug: str, public_key: str) -> None:
+def call_awx_callback(mac: str, proxy_port: int, t_name: str, t_slug: str, s_name: str, s_slug: str, public_key: str) -> None:
     """
     Call AWX provisioning callback URL.
 
     Args:
         mac: Probe MAC address
         proxy_port: Assigned proxy port
-        tenant_slug: Tenant identifier
-        site_slug: Site identifier
+        t_name: Tenant Display Name
+        t_slug: Tenant URL-safe slug
+        s_name: Site Display Name
+        s_slug: Site URL-safe slug
         public_key: SSH public key
 
     Raises:
@@ -294,8 +336,10 @@ def call_awx_callback(mac: str, proxy_port: int, tenant_slug: str, site_slug: st
     payload = {
         "mac": mac,
         "proxy_port": proxy_port,
-        "tenant_slug": tenant_slug,
-        "site_slug": site_slug,
+        "tenant_name": t_name,
+        "tenant_slug": t_slug,
+        "site_name": s_name,
+        "site_slug": s_slug,
         "public_key": public_key,
         "hostname": socket.gethostname(),
         "timestamp": datetime.utcnow().isoformat(),
@@ -350,7 +394,7 @@ def main():
     try:
         # Step 1: Read configuration
         logger.info("Step 1: Reading configuration")
-        tenant_slug, site_slug = read_config()
+        t_name, t_slug, s_name, s_slug = read_config()
 
         # Step 2: Get MAC address
         logger.info("Step 2: Getting MAC address")
@@ -370,7 +414,7 @@ def main():
 
         # Step 6: Call AWX callback
         logger.info("Step 6: Calling AWX provisioning callback")
-        call_awx_callback(mac, proxy_port, tenant_slug, public_key)
+        call_awx_callback(mac, proxy_port, t_name, t_slug, s_name, s_slug, public_key)
 
         # Step 7: Mark bootstrap complete
         logger.info("Step 7: Writing bootstrap completion marker")
@@ -378,7 +422,8 @@ def main():
 
         logger.info("=" * 60)
         logger.info("Bootstrap completed successfully!")
-        logger.info(f"  Tenant: {tenant_slug}")
+        logger.info(f"  Tenant: {t_name} ({t_slug})")
+        logger.info(f"  Site:   {s_name} ({s_slug})")
         logger.info(f"  MAC: {mac}")
         logger.info(f"  Proxy Port: {proxy_port}")
         logger.info(f"  Service: autossh-probe-{proxy_port}.service")
