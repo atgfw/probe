@@ -57,16 +57,19 @@ PROXY_HOST = os.getenv("PROXY_HOST", "167.99.59.231")
 PROXY_USER = os.getenv("PROXY_USER", "tunnelmgr")
 
 
-def read_config() -> str:
+def read_config() -> tuple[str, str]:
     """
-    Read TENANT_SLUG from available config paths.
+    Read TENANT_SLUG and SITE_SLUG from available config paths.
 
     Returns:
-        Tenant slug string
+        Tuple of (tenant_slug, site_slug)
 
     Raises:
         RuntimeError: If no config file found or tenant slug not found
     """
+    tenant_slug = None
+    site_slug = None
+
     for config_path in CONFIG_PATHS:
         path = Path(config_path)
         if not path.exists():
@@ -79,9 +82,15 @@ def read_config() -> str:
                     line = line.strip()
                     if line.startswith('TENANT_SLUG='):
                         tenant_slug = line.split('=', 1)[1].strip().strip('"\'')
-                        if tenant_slug:
-                            logger.info(f"Found tenant slug: {tenant_slug} in {config_path}")
-                            return tenant_slug
+                    elif line.startswith('SITE_SLUG='):
+                        site_slug = line.split('=', 1)[1].strip().strip('"\'')
+            
+            if tenant_slug:
+                logger.info(f"Found tenant slug: {tenant_slug}")
+                # SITE_SLUG is optional, default to tenant_slug if missing
+                final_site_slug = site_slug if site_slug else tenant_slug
+                logger.info(f"Using site slug: {final_site_slug}")
+                return tenant_slug, final_site_slug
         except Exception as e:
             logger.warning(f"Error reading {config_path}: {e}")
 
@@ -264,7 +273,7 @@ WantedBy=multi-user.target
         raise RuntimeError(f"Failed to create systemd service: {e}")
 
 
-def call_awx_callback(mac: str, proxy_port: int, tenant_slug: str, public_key: str) -> None:
+def call_awx_callback(mac: str, proxy_port: int, tenant_slug: str, site_slug: str, public_key: str) -> None:
     """
     Call AWX provisioning callback URL.
 
@@ -272,6 +281,7 @@ def call_awx_callback(mac: str, proxy_port: int, tenant_slug: str, public_key: s
         mac: Probe MAC address
         proxy_port: Assigned proxy port
         tenant_slug: Tenant identifier
+        site_slug: Site identifier
         public_key: SSH public key
 
     Raises:
@@ -285,6 +295,7 @@ def call_awx_callback(mac: str, proxy_port: int, tenant_slug: str, public_key: s
         "mac": mac,
         "proxy_port": proxy_port,
         "tenant_slug": tenant_slug,
+        "site_slug": site_slug,
         "public_key": public_key,
         "hostname": socket.gethostname(),
         "timestamp": datetime.utcnow().isoformat(),
@@ -338,8 +349,8 @@ def main():
 
     try:
         # Step 1: Read configuration
-        logger.info("Step 1: Reading tenant configuration")
-        tenant_slug = read_config()
+        logger.info("Step 1: Reading configuration")
+        tenant_slug, site_slug = read_config()
 
         # Step 2: Get MAC address
         logger.info("Step 2: Getting MAC address")

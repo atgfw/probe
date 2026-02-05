@@ -1,0 +1,2 @@
+TENANT_SLUG=applied-technology-group-inc
+SITE_SLUG=lakota

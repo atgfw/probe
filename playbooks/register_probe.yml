@@ -105,6 +105,26 @@
       ansible.builtin.set_fact:
         vrf_info: "{{ vrf_result.vrf }}"
 
+
+    # ============================================
+    # Task 3: Create/Update NetBox Site
+    # ============================================
+    - name: Ensure site exists in NetBox
+      netbox.netbox.netbox_site:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ site_slug | title }}"
+          slug: "{{ site_slug }}"
+          tenant: "{{ tenant_info.id }}"
+          status: "active"
+        state: present
+      register: site_result
+
+    - name: Set site info
+      ansible.builtin.set_fact:
+        site_info: "{{ site_result.site }}"
+
     - name: Get device role for probes
       ansible.builtin.uri:
         url: "{{ netbox_url }}/api/dcim/device-roles/?slug=network-probe"
@@ -131,7 +151,7 @@
           device_role: "{{ device_role_id }}"
           device_type: "network-probe"
           tenant: "{{ tenant_info.id }}"
-          site: "remote-site"
+          site: "{{ site_info.id }}"
           status: "active"
           custom_fields:
             automation_proxy_port: "{{ proxy_port }}"
