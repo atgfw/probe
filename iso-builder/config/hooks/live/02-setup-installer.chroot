@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+chmod +x /usr/local/bin/probe-install.py
+ln -sf /usr/local/bin/probe-install.py /usr/local/bin/probe-install
+
+# Add a message to MOTD
+cat >> /etc/motd << EOF
+
+====================================================
+      NETWORK PROBE - LIVE ENVIRONMENT
+====================================================
+To install this probe permanently to the internal
+hard drive, run:
+
+    sudo probe-install
+
+WARNING: This will wipe the internal SSD/HDD!
+====================================================
+
+EOF
