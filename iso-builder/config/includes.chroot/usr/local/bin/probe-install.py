@@ -116,6 +116,11 @@ UUID={esp_uuid}  /boot/efi       vfat    umask=0077      0       2
     logger.info("Installation complete! You can now reboot and remove the USB.")
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Network Probe Internal Disk Installer")
+    parser.add_argument('--auto', action='store_true', help="Install automatically without prompts")
+    args = parser.parse_args()
+
     if os.getuid() != 0:
         print("Error: This script must be run as root.")
         sys.exit(1)
@@ -130,11 +135,16 @@ def main():
         logger.error(e)
         sys.exit(1)
 
-    print(f"\nWARNING: This will wipe all data on {disk}!")
-    confirm = input(f"Are you absolutely sure you want to proceed? (yes/N): ")
-    if confirm.lower() != 'yes':
-        print("Aborted.")
-        sys.exit(0)
+    if not args.auto:
+        print(f"\nWARNING: This will wipe all data on {disk}!")
+        confirm = input(f"Are you absolutely sure you want to proceed? (yes/N): ")
+        if confirm.lower() != 'yes':
+            print("Aborted.")
+            sys.exit(0)
+    else:
+        print(f"\nAUTOMATED INSTALLATION TRIGGERED ON {disk}")
+        print("Starting in 3 seconds... Press Ctrl+C to abort.")
+        time.sleep(3)
 
     try:
         install_system(disk)

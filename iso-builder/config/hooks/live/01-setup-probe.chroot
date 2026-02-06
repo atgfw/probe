@@ -1,8 +1,9 @@
 #!/bin/sh
 set -e
 
-echo "Enabling probe-bootstrap.service..."
+echo "Enabling probe-bootstrap and installer services..."
 systemctl enable probe-bootstrap.service
+systemctl enable probe-auto-install.service
 
 echo "Installing additional Python dependencies via pip..."
 # These might not be available as debian packages in the base mirror
