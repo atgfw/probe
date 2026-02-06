@@ -74,11 +74,38 @@ def install_system(target_disk):
     run_cmd(['mount', esp_part, str(target_mnt / 'boot' / 'efi')])
 
     logger.info("Cloning system (this may take a few minutes)...")
-    # In live env, the system is in /run/live/rootfs/filesystem.squashfs mounted at /
-    # We want to copy the running system but exclude virtual dirs
     run_cmd(['rsync', '-aAXHAX', '--info=progress2', '--exclude', '/proc/*', '--exclude', '/sys/*', 
              '--exclude', '/dev/*', '--exclude', '/run/*', '--exclude', '/tmp/*', 
              '--exclude', '/mnt/*', '--exclude', '/media/*', '--exclude', '/lost+found', '/', str(target_mnt)])
+
+    # --- NEW: Persist configuration from Live media to Internal Disk ---
+    logger.info("Persisting configuration to internal disk...")
+    # Check common locations where the USB might be mounted or where config might be
+    config_sources = [
+        '/boot/probe_config.txt',
+        '/media/live/probe_config.txt',
+        '/probe_config.txt',
+    ]
+    # Also check all mounted partitions for the file
+    try:
+        find_cmd = run_cmd(['find', '/media', '/run/live', '-name', 'probe_config.txt'], check=False)
+        if find_cmd.returncode == 0:
+            config_sources.extend(find_cmd.stdout.splitlines())
+    except:
+        pass
+
+    found_config = None
+    for src in config_sources:
+        if os.path.exists(src):
+            found_config = src
+            break
+    
+    if found_config:
+        logger.info(f"Copying config from {found_config} to internal disk")
+        run_cmd(['cp', found_config, str(target_mnt / 'etc' / 'probe_config.txt')])
+    else:
+        logger.warning("No probe_config.txt found to persist! You may need to provide it manually on the first boot.")
+    # ------------------------------------------------------------------
 
     # 3. Fix fstab
     logger.info("Updating fstab...")

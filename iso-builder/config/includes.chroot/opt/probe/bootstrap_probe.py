@@ -37,10 +37,11 @@ logger = logging.getLogger(__name__)
 
 # Configuration search paths (ordered by preference)
 CONFIG_PATHS = [
-    "/boot/probe_config.txt",
-    "/run/live/medium/probe_config.txt", # Boot media in Debian Live
-    "/boot/firmware/probe_config.txt",   # Common on some Debian/RPi variants
-    "/mnt/probe_config.txt",
+    '/etc/probe_config.txt',
+    '/boot/probe_config.txt',
+    '/media/live/probe_config.txt',
+    '/probe_config.txt',
+    './probe_config.txt'
 ]
 NETWORK_INTERFACE = "eth0"
 SSH_DIR = Path.home() / ".ssh"
