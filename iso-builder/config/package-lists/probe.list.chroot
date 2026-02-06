@@ -13,3 +13,5 @@ rsync
 grub-pc
 grub-efi-amd64-bin
 efibootmgr
+dosfstools
+e2fsprogs
